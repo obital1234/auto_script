@@ -1,0 +1,411 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PresentTrading - Optimized for 15min Altcoin Trading
+
+// SuperATR 15분 알트코인 자동매매 전략
+// 15분 봉과 알트코인의 높은 변동성에 최적화된 다층 수익실현 전략
+
+//@version=5
+//@strategy_alert_message {{strategy.order.alert_message}}
+
+// ************************************** POA ************************************** //
+import dokang/POA/15 as POA
+import blackcat1402/pandas_ta/7 as pta
+
+// 자동매매 시간 설정 (24시간 운영)
+start_time = input.time(timestamp("2025-06-30T18:00:00+09:00"), title="자동매매 시작")
+end_time = input.time(timestamp("2099-06-22T23:59:59+09:00"), title="자동매매 종료")
+
+// 포아봇 설정 (알트코인용 레버리지 조정)
+pstrategy = POA.bot.new("candy2255*", start_time, end_time, leverage = 6)
+pstrategy.start_trade()
+// ********************************************************************************* //
+
+strategy("SuperATR 15M Altcoin Auto-Trading [presentTrading]", 
+         overlay=true, 
+         precision=4, 
+         commission_value=0.1, 
+         commission_type=strategy.commission.percent, 
+         slippage=2, 
+         currency=currency.USDT, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=70, 
+         initial_capital=100, 
+         margin_long=0, 
+         margin_short=0)
+
+// ————————————————————————————————————————————————————————————————————————————————
+// 15분 알트코인 최적화 파라미터
+// ————————————————————————————————————————————————————————————————————————————————
+
+// 기본 트렌드 분석 파라미터 (15분봉 최적화)
+short_period = input.int(20, minval=5, title="단기 이동평균 기간")
+long_period = input.int(120, minval=20, title="장기 이동평균 기간")
+stop_period = input.int(50, title = "스탑 EMA 기간")
+momentum_period = input.int(8, title="모멘텀 분석 기간")
+atr_sma_period = input.int(5, minval=3, maxval=20, title="ATR 평활화 기간")
+
+// 알트코인 트렌드 강도 임계값
+trend_strength_threshold = input.float(2.0, minval=0.5, maxval=3.0, step=0.1, title="트렌드 강도 임계값")
+
+// 추가 필터링 옵션
+use_volume_filter = input.bool(true, title="거래량 필터 사용")
+volume_ma_length = input.int(20, minval=10, maxval=50, title="거래량 이동평균 기간")
+volume_threshold = input.float(1.4, minval=1.0, maxval=3.0, step=0.1, title="거래량 증가 임계값")
+
+// RSI 오버바이/오버셀 필터
+use_rsi_filter = input.bool(true, title="RSI 필터 사용")
+rsi_length = input.int(14, minval=5, maxval=30, title="RSI 기간")
+rsi_overbought = input.int(75, minval=60, maxval=90, title="RSI 과매수 구간")
+rsi_oversold = input.int(25, minval=10, maxval=40, title="RSI 과매도 구간")
+
+// ————————————————————————————————————————————————————————————————————————————————
+// 알트코인 특화 수익실현 설정
+// ————————————————————————————————————————————————————————————————————————————————
+
+useMultiStepTP = input.bool(false, title="다단계 수익실현 활성화")
+
+// ATR 기반 수익실현 (알트코인 변동성 고려)
+atrLengthTP = input.int(10, minval=5, maxval=20, title="수익실현용 ATR 기간")
+atrMultiplierTP1 = input.float(1.5, minval=0.5, maxval=5.0, step=0.1, title="ATR 배수 1단계")
+atrMultiplierTP2 = input.float(3.0, minval=1.0, maxval=8.0, step=0.1, title="ATR 배수 2단계")
+atrMultiplierTP3 = input.float(5.5, minval=2.0, maxval=12.0, step=0.1, title="ATR 배수 3단계")
+atrMultiplierTP4 = input.float(8.0, minval=3.0, maxval=15.0, step=0.1, title="ATR 배수 4단계")
+
+// 고정 퍼센트 수익실현 (알트코인 급등/급락 대응)
+tp_level_percent1 = input.float(1.5, minval=1.0, maxval=10.0, step=0.1, title="고정 수익률 1단계 (%)")
+tp_level_percent2 = input.float(4.5, minval=2.0, maxval=15.0, step=0.1, title="고정 수익률 2단계 (%)")
+tp_level_percent3 = input.float(12.0, minval=5.0, maxval=25.0, step=0.1, title="고정 수익률 3단계 (%)")
+
+// 각 단계별 청산 비율
+tp_percent_atr = input.float(15.0, minval=5.0, maxval=30.0, step=1.0, title="ATR 기반 단계별 청산 비율 (%)")
+tp_percent_fixed = input.float(12.0, minval=5.0, maxval=25.0, step=1.0, title="고정 비율 단계별 청산 비율 (%)")
+
+// 손절매 설정
+use_stop_loss = input.bool(true, title="손절매 사용")
+//stop_loss_atr_multiplier = input.float(2.0, minval=1.0, maxval=5.0, step=0.1, title="손절매 ATR 배수")
+trail_atr_multiplier = input.float(2.0, title = "트레일링 스탑 ATR 배수")
+offset_atr_multiplier = input.float(3.0, title = "트레일링 오프셋 ATR 배수")
+
+htf = input.timeframe("240",title = "MACD 타임프레임")
+// ————————————————————————————————————————————————————————————————————————————————
+// 향상된 지표 계산
+// ————————————————————————————————————————————————————————————————————————————————
+
+// True Range 계산 (변동성 측정)
+calculate_enhanced_tr() =>
+    prev_close = close[1]
+    tr1 = high - low
+    tr2 = math.abs(high - prev_close)
+    tr3 = math.abs(low - prev_close)
+    // 갭 발생시 추가 가중치 적용
+    gap_factor = math.abs(open - prev_close) > (prev_close * 0.02) ? 1.2 : 1.0
+    true_range = math.max(tr1, tr2, tr3) * gap_factor
+    true_range
+
+// 알트코인 특화 모멘텀 계산
+calculate_altcoin_momentum() =>
+    price_change = close - close[momentum_period]
+    volatility = ta.atr(momentum_period)
+    volume_factor = use_volume_filter ? (volume / ta.sma(volume, volume_ma_length)) : 1.0
+    
+    // 정규화된 모멘텀 (변동성과 거래량 고려)
+    normalized_momentum = volatility != 0 ? (price_change / volatility) * math.sqrt(volume_factor) : 0
+    momentum_strength = math.abs(normalized_momentum)
+    momentum_strength
+
+// 기본 지표 계산
+true_range = calculate_enhanced_tr()
+momentum_factor = calculate_altcoin_momentum()
+
+// 적응형 ATR 계산
+short_atr = ta.sma(true_range, short_period)
+long_atr = ta.sma(true_range, long_period)
+adaptive_atr = (short_atr * momentum_factor + long_atr) / (1 + momentum_factor)
+
+// 트렌드 강도 계산
+price_change = close - close[momentum_period]
+atr_multiple = adaptive_atr != 0 ? (price_change / adaptive_atr) : 0
+trend_strength = ta.ema(atr_multiple, momentum_period)  // EMA로 변경하여 더 빠른 반응
+//plot(trend_strength, title = "Trend", color = color.yellow, linewidth = 1)
+// 이동평균 계산
+short_ma = ta.ema(close, short_period)  // EMA로 변경
+long_ma = ta.ema(close, long_period)
+stop_ma = ta.ema(close, stop_period)
+
+// 추가 필터 계산
+rsi_value = ta.rsi(close, rsi_length)
+volume_ma = ta.sma(volume, volume_ma_length)
+volume_ratio = volume / volume_ma
+
+// ADX 필터
+adx = pta.adx(14)
+
+//MACD
+[macd_line, macd_signal, macd_hist] = request.security(syminfo.tickerid, htf, ta.macd(close, 12, 26, 9))
+[short_macd_line, short_macd_signal, short_macd_hist] = ta.macd(close, 12, 26, 9)
+
+slope = (ta.linreg(close, 120, 0) - ta.linreg(close, 120, 1))*10
+
+// OBV 
+obv = ta.obv
+obv_sma = ta.sma(obv, 7)
+obv_slope = obv_sma[1] - obv_sma[2]
+
+// CCI  
+cci = ta.cci((high + low + close)/3, 14)
+
+// 볼린저
+[bb_sma, bb_high, bb_low] = request.security(syminfo.tickerid, htf, ta.bb(close, 20, 2))
+dev = 2 * ta.stdev(close, 20)
+
+bb_high_risk = close > bb_high ? (close - bb_high) / dev : 0
+bb_low_risk = bb_low > close ? (bb_low - close) / dev : 0
+plot(bb_high, title = "BB High", color = color.red, linewidth = 1)
+plot(bb_sma, title = "BB sma", color = color.blue, linewidth = 1)
+plot(bb_low, title = "BB Low", color = color.green, linewidth = 1)
+// ————————————————————————————————————————————————————————————————————————————————
+// 향상된 진입/청산 조건
+// ————————————————————————————————————————————————————————————————————————————————
+
+// 기본 트렌드 신호
+//basic_long_signal = short_ma > long_ma and trend_strength > trend_strength_threshold
+basic_long_signal = (short_ma - long_ma) >= 0.5 and (short_ma - long_ma) < 3 and adx >= 20 and obv_slope > 0 and slope > 0.1
+basic_short_signal = (long_ma - short_ma) >= 0.5 and (long_ma - long_ma) < 3 and adx >= 20 and obv_slope < 0 and slope < -0.1
+
+// 거래량 필터
+volume_ok = not use_volume_filter or volume_ratio >= volume_threshold
+
+// RSI 필터 (극단적 과매수/과매도 상황 회피)
+rsi_ok_long = not use_rsi_filter or rsi_value < rsi_overbought
+rsi_ok_short = not use_rsi_filter or rsi_value > rsi_oversold
+
+// ADX 증가량
+adx_change = adx - adx[1]
+adx_smooth = ta.sma(adx_change, 3)
+
+// 가격 액션 확인
+price_action_long = close > short_ma and close > open  // 양봉이면서 단기 MA 위
+price_action_short = close < short_ma and close < open  // 음봉이면서 단기 MA 아래
+
+// 볼린저 돌파
+bb_long_ok = bb_high_risk < 0.2
+bb_short_ok = bb_low_risk < 0.2
+
+//볼린저 역돌파 추적
+bb_short_reverse = bb_high_risk > 0.5
+bb_long_reverse = bb_low_risk > 0.5
+
+// 볼진저 폭 
+bb_width = bb_high - bb_low
+
+// 폭 변화량 
+bb_width_change = bb_width - bb_width[16]
+
+// ATR 증가 확인 (변동성 증가시 진입)
+atr_sma = ta.sma(adaptive_atr, atr_sma_period)
+atr_increasing = adaptive_atr > atr_sma * 0.95
+
+// 최종 진입 조건
+long_entry = basic_long_signal and price_action_long and volume_ok and rsi_ok_long and atr_increasing and bb_long_ok and bb_width > 9
+short_entry = basic_short_signal and price_action_short and volume_ok and rsi_ok_short and atr_increasing and bb_short_ok and bb_width > 9
+//bb_over_long_entry = atr_increasing and bb_width > 11 and bb_width_change > 1 and (close - bb_high) / bb_high > 0.005 and close > ta.highest(close, 5)[1] and adx_change > 0
+//bb_over_short_entry = atr_increasing and bb_width > 11 and bb_width_change > 1 and (bb_low - close) / bb_low > 0.005 and close < ta.lowest(close, 5)[1] and adx_change > 0
+bb_long_entry = ta.crossover(close, bb_low)
+bb_short_entry = ta.crossunder(close, bb_high)
+// 청산 조건 (트렌드 반전 또는 모멘텀 약화)
+long_exit = (strategy.position_size > 0) and (short_entry or ta.crossunder(macd_line, macd_signal))
+short_exit = (strategy.position_size < 0) and (long_entry or ta.crossover(macd_line, macd_signal))
+bb_long_exit = (strategy.position_size > 0) and (ta.crossover(close, long_ma))
+bb_short_exit = (strategy.position_size < 0) and (ta.crossunder(close, long_ma))
+//bb_over_long_exit = (strategy.position_size > 0) and (bb_short_entry or bb_over_short_entry or short_entry or ta.crossunder(short_ma, long_ma))
+//bb_over_short_exit = (strategy.position_size < 0) and (bb_long_entry or bb_over_long_entry or long_entry or ta.crossover(short_ma, long_ma))
+reverse_long = ((strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Close entry(s) order Short Entry") or (strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Close entry(s) order BB Over Short Entry")) and adx > 30
+reverse_short = ((strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Close entry(s) order Long Entry") or (strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "Close entry(s) order BB Over Long Entry")) and adx > 30
+reverse_long_exit = ta.crossover(close, bb_high) or rsi_value > 75 or ta.crossunder(close, bb_low)
+reverse_short_exit = ta.crossunder(close, bb_low) or rsi_value < 25 or ta.crossover(close, bb_high)
+// ————————————————————————————————————————————————————————————————————————————————
+// 자동매매 실행
+// ————————————————————————————————————————————————————————————————————————————————
+
+// 롱 포지션 진입/청산
+if long_entry and strategy.position_size == 0
+    pstrategy.entry("Long Entry", "strategy.long")
+
+if long_exit
+    pstrategy.close("Long Entry")
+
+// 숏 포지션 진입/청산
+if short_entry and strategy.position_size == 0
+    pstrategy.entry("Short Entry", "strategy.short")
+
+if short_exit
+    pstrategy.close("Short Entry")
+
+if bb_long_entry and strategy.position_size == 0
+    pstrategy.entry("BB Long Entry", "strategy.long")
+
+if bb_long_exit
+    pstrategy.close("BB Long Entry")
+
+if bb_short_entry and strategy.position_size == 0
+    pstrategy.entry("BB Short Entry", "strategy.short")
+
+if bb_short_exit
+    pstrategy.close("BB Short Entry")
+
+//if bb_over_long_entry and strategy.position_size == 0
+  //  pstrategy.entry("BB Over Long Entry", "strategy.long")
+
+
+//if bb_over_short_entry and strategy.position_size == 0
+  //  pstrategy.entry("BB Over Short Entry", "strategy.short")
+
+//if bb_over_long_exit 
+  //  pstrategy.close("BB Over Long Entry")
+
+//if bb_over_short_exit
+  //  pstrategy.close("BB Over Short Entry")
+
+if reverse_long and strategy.position_size == 0
+    pstrategy.entry("Reverse Long", "strategy.long")
+
+if reverse_long_exit
+    pstrategy.close("Reverse Long")
+
+if reverse_short and strategy.position_size == 0
+    pstrategy.entry("Reverse Short", "strategy.short")
+
+if reverse_short_exit 
+    pstrategy.close("Reverse Short")
+// ————————————————————————————————————————————————————————————————————————————————
+// 다단계 수익실현 및 손절매
+// ————————————————————————————————————————————————————————————————————————————————
+//plot(ta.atr(atrLengthTP), title = "ATR", color = color.blue, linewidth = 1)
+if useMultiStepTP
+    atrValueTP = ta.atr(atrLengthTP)
+    // 롱 포지션 수익실현
+    if strategy.position_size > 0
+        entry_price = strategy.position_avg_price
+        
+        // ATR 기반 목표가
+        tp_atr1_long = entry_price + atrMultiplierTP1 * atrValueTP
+        tp_atr2_long = entry_price + atrMultiplierTP2 * atrValueTP
+        tp_atr3_long = entry_price + atrMultiplierTP3 * atrValueTP
+        tp_atr4_long = entry_price + atrMultiplierTP4 * atrValueTP
+        
+        // 고정 퍼센트 목표가
+        tp_pct1_long = entry_price * (1 + tp_level_percent1 / 100)
+        tp_pct2_long = entry_price * (1 + tp_level_percent2 / 100)
+        tp_pct3_long = entry_price * (1 + tp_level_percent3 / 100)
+        
+        // 손절매 가격
+        //stop_price_long = use_stop_loss ? entry_price - stop_loss_atr_multiplier * atrValueTP : na
+        trail_points = 1.0
+        trail_offset = 2.0
+        // ATR 기반 수익실현 주문
+        pstrategy.exit("TP ATR1 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_atr1_long, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP ATR2 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_atr2_long, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP ATR3 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_atr3_long, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP ATR4 Long", from_entry="Long Entry", qty_percent=tp_percent_atr, limit=tp_atr4_long, trail_points = trail_points, trail_offset = trail_offset)
+        
+        // 고정 퍼센트 수익실현 주문
+        pstrategy.exit("TP PCT1 Long", from_entry="Long Entry", qty_percent=tp_percent_fixed, limit=tp_pct1_long, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP PCT2 Long", from_entry="Long Entry", qty_percent=tp_percent_fixed, limit=tp_pct2_long, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP PCT3 Long", from_entry="Long Entry", qty_percent=tp_percent_fixed, limit=tp_pct3_long, trail_points = trail_points, trail_offset = trail_offset)
+    
+    // 숏 포지션 수익실현
+    if strategy.position_size < 0
+        entry_price = strategy.position_avg_price
+        
+        // ATR 기반 목표가
+        tp_atr1_short = entry_price - atrMultiplierTP1 * atrValueTP
+        tp_atr2_short = entry_price - atrMultiplierTP2 * atrValueTP
+        tp_atr3_short = entry_price - atrMultiplierTP3 * atrValueTP
+        tp_atr4_short = entry_price - atrMultiplierTP4 * atrValueTP
+        
+        // 고정 퍼센트 목표가
+        tp_pct1_short = entry_price * (1 - tp_level_percent1 / 100)
+        tp_pct2_short = entry_price * (1 - tp_level_percent2 / 100)  
+        tp_pct3_short = entry_price * (1 - tp_level_percent3 / 100)
+        
+        // 손절매 가격
+        //stop_price_short = use_stop_loss ? entry_price + stop_loss_atr_multiplier * atrValueTP : na
+        trail_points = 1.0
+        trail_offset = 2.0
+        // ATR 기반 수익실현 주문
+        pstrategy.exit("TP ATR1 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_atr1_short, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP ATR2 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_atr2_short, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP ATR3 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_atr3_short, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP ATR4 Short", from_entry="Short Entry", qty_percent=tp_percent_atr, limit=tp_atr4_short, trail_points = trail_points, trail_offset = trail_offset)
+        
+        // 고정 퍼센트 수익실현 주문
+        pstrategy.exit("TP PCT1 Short", from_entry="Short Entry", qty_percent=tp_percent_fixed, limit=tp_pct1_short, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP PCT2 Short", from_entry="Short Entry", qty_percent=tp_percent_fixed, limit=tp_pct2_short, trail_points = trail_points, trail_offset = trail_offset)
+        pstrategy.exit("TP PCT3 Short", from_entry="Short Entry", qty_percent=tp_percent_fixed, limit=tp_pct3_short, trail_points = trail_points, trail_offset = trail_offset)
+else
+    atrValueTP = ta.atr(atrLengthTP)
+    if strategy.position_size > 0
+        entry_price = strategy.position_avg_price
+        trail_price = entry_price + 5.7 * atrValueTP
+        pstrategy.exit("Trail Long", from_entry = "BB Long Entry", qty_percent = 100, trail_price = trail_price)
+        pstrategy.exit("Trail Long", from_entry = "Long Entry", qty_percent = 100, trail_price = trail_price)
+      //  pstrategy.exit("Trail Long", from_entry = "BB Over Long Entry", qty_percent = 100, trail_price = trail_price)
+        pstrategy.exit("Trail Long", from_entry = "Reverse Long", qty_percent = 100, trail_price = trail_price)
+    else if strategy.position_size < 0
+        entry_price = strategy.position_avg_price
+        trail_price = entry_price - 5.7 * atrValueTP
+        pstrategy.exit("Trail Short", from_entry = "BB Short Entry", qty_percent = 100, trail_price = trail_price)
+        pstrategy.exit("Trail Short", from_entry = "Short Entry", qty_percent = 100, trail_price = trail_price)
+     //   pstrategy.exit("Trail Short", from_entry = "BB Over Short Entry", qty_percent = 100, trail_price = trail_price)
+        pstrategy.exit("Trail Long", from_entry = "Reverse Short", qty_percent = 100, trail_price = trail_price)
+
+// 실전 매매 모드
+
+// ————————————————————————————————————————————————————————————————————————————————
+// 차트 표시
+// ————————————————————————————————————————————————————————————————————————————————
+entry_price = strategy.position_avg_price
+atrValueTP = ta.atr(atrLengthTP)
+long_trail_price = entry_price + 5.7 * atrValueTP
+short_trail_price = entry_price - 5.7 * atrValueTP
+plot(long_trail_price, title = "Trailing", color = color.purple, linewidth = 1)
+plot(short_trail_price, title = "Trailing", color = color.purple, linewidth = 1)
+// 이동평균선
+plot(short_ma, color=color.blue, linewidth=2, title="단기 EMA")
+plot(long_ma, color=color.orange, linewidth=2, title="장기 EMA")
+
+
+// 진입 신호 표시
+//plotshape(long_entry, title="롱 진입", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="BUY")
+//plotshape(short_entry, title="숏 진입", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SELL")
+
+//청산 신호 표시
+plotshape(long_exit and strategy.position_size > 0, title="롱 청산", style=shape.xcross, 
+          location=location.abovebar, color=color.new(color.blue, 0), size=size.tiny)
+plotshape(short_exit and strategy.position_size < 0, title="숏 청산", style=shape.xcross, 
+          location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny)
+
+// 배경색으로 트렌드 표시
+trend_color = basic_long_signal ? color.new(color.green, 95) : 
+              basic_short_signal ? color.new(color.red, 95) : 
+              color.new(color.gray, 98)
+bgcolor(trend_color, title="트렌드 배경")
+
+// 정보 테이블 (우측 상단)
+var table info_table = table.new(position.top_right, 2, 7, bgcolor=color.white, border_width=1)
+
+
+table.cell(info_table, 0, 0, "지표", text_color=color.black, bgcolor=color.gray)
+table.cell(info_table, 1, 0, "값", text_color=color.black, bgcolor=color.gray)
+table.cell(info_table, 0, 1, "BB High Risk", text_color=color.black)
+table.cell(info_table, 1, 1, str.tostring(bb_high_risk, "#.##"), text_color=color.black)
+table.cell(info_table, 0, 2, "BB Low Risk", text_color=color.black)
+table.cell(info_table, 1, 2, str.tostring((close - bb_low) / bb_low, "#.##"), text_color=color.black)
+table.cell(info_table, 0, 3, "ADX Change", text_color=color.black)
+table.cell(info_table, 1, 3, str.tostring(adx_smooth, "#.##"), text_color=color.black)
+table.cell(info_table, 0, 4, "BB Width", text_color=color.black)
+table.cell(info_table, 1, 4, str.tostring(bb_width, "#.####"), text_color=color.black)
+table.cell(info_table, 0, 5, "포지션", text_color=color.black)
+table.cell(info_table, 1, 5, strategy.position_size > 0 ? "롱" : strategy.position_size < 0 ? "숏" : "없음", text_color=color.black)
+table.cell(info_table, 0, 6, "수익률", text_color=color.black)
+table.cell(info_table, 1, 6, str.tostring(strategy.netprofit / strategy.initial_capital * 100, "#.##") + "%", text_color=strategy.netprofit >= 0 ? color.green : color.red)
